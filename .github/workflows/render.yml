@@ -1,0 +1,74 @@
+name: Render Remotion ZIP to MP4
+
+on:
+  push:
+    paths:
+      - 'uploads/*.zip'
+
+permissions:
+  contents: write
+
+jobs:
+  render-video:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Extract ZIP and Render MP4
+        id: render
+        run: |
+          ZIP_FILE=$(ls -t uploads/*.zip 2>/dev/null | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No ZIP file found"
+            exit 1
+          fi
+
+          FILENAME=$(basename "$ZIP_FILE")
+          BASE_NAME="${FILENAME%.zip}"
+          echo "base_name=$BASE_NAME" >> $GITHUB_OUTPUT
+
+          mkdir -p project_work
+          unzip -q "$ZIP_FILE" -d project_work
+
+          SUBDIR=$(find project_work -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          if [ -n "$SUBDIR" ] && [ -f "$SUBDIR/package.json" ]; then
+            cd "$SUBDIR"
+          else
+            cd project_work
+          fi
+
+          npm install --no-audit --no-fund
+
+          ENTRY=""
+          for f in src/index.ts src/index.tsx src/index.js index.ts index.tsx index.js; do
+            if [ -f "$f" ]; then
+              ENTRY="$f"
+              break
+            fi
+          done
+
+          if [ -z "$ENTRY" ]; then
+            echo "Entry point not found"
+            exit 1
+          fi
+
+          COMP_ID=$(npx remotion compositions "$ENTRY" --quiet | head -n 1 | awk '{print $1}')
+          if [ -z "$COMP_ID" ]; then
+            COMP_ID="Main"
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/rendered_videos"
+          npx remotion render "$ENTRY" "$COMP_ID" "$GITHUB_WORKSPACE/rendered_videos/${BASE_NAME}.mp4" --codec=h264
+
+      - name: Publish MP4 to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: render-${{ github.run_id }}
+          name: "Render ${{ steps.render.outputs.base_name }}"
+          files: rendered_videos/*.mp4
