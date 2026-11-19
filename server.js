@@ -8,10 +8,13 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO_OWNER = 'erivobd';
 const REPO_NAME = 'remotion.mp4';
 
-// মেমোরিতে ফাইল নেওয়া (Render ডিস্ক মুছে যাওয়ার সমস্যা এড়াতে)
-const upload = multer({ storage: multer.memoryStorage() });
+// ১০০ এমবি পর্যন্ত ফাইল মেমোরিতে নেওয়ার অনুমতি
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 }
+});
 
-app.use(express.json());
+app.use(express.json({ limit: '100mb' }));
 
 // ওয়েব অ্যাপের মূল ইন্টারফেস
 app.get('/', (req, res) => {
@@ -54,17 +57,26 @@ app.get('/', (req, res) => {
         return;
       }
 
+      const file = fileInput.files[0];
+      const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+
       const formData = new FormData();
-      formData.append('projectZip', fileInput.files[0]);
+      formData.append('projectZip', file);
       if (compId) formData.append('compositionId', compId);
 
       btn.disabled = true;
       statusDiv.style.display = 'block';
-      statusDiv.innerHTML = 'ZIP ফাইল GitHub-এ আপলোড হচ্ছে...';
+      statusDiv.innerHTML = 'ZIP ফাইল (' + sizeMB + ' MB) আপলোড হচ্ছে... বড় ফাইল হলে একটু সময় লাগতে পারে।';
 
       try {
         const res = await fetch('/api/render', { method: 'POST', body: formData });
-        const data = await res.json();
+        const rawText = await res.text();
+        let data;
+        try {
+          data = JSON.parse(rawText);
+        } catch (parseErr) {
+          throw new Error('সার্ভার রেসপন্স এরর (' + res.status + '): ফাইলটি অনেক বড় হওয়ায় বা সার্ভার রিস্টার্ট হওয়ায় সংযোগ বিচ্ছিন্ন হয়েছে। আবার চেষ্টা করুন।');
+        }
 
         if (!res.ok) throw new Error(data.error || 'সমস্যা হয়েছে');
 
@@ -112,7 +124,7 @@ app.post('/api/render', upload.single('projectZip'), async (req, res) => {
     const renderId = `rnd_${Date.now()}`;
     const compositionId = req.body.compositionId || '';
 
-    // ১. GitHub-এ একটি অস্থায়ী Release তৈরি করা
+    // ১. GitHub-এ অস্থায়ী Release তৈরি করা
     const relRes = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases`, {
       method: 'POST',
       headers: {
@@ -135,7 +147,7 @@ app.post('/api/render', upload.single('projectZip'), async (req, res) => {
     const relData = await relRes.json();
     const uploadUrl = relData.upload_url.replace('{?name,label}', `?name=project.zip`);
 
-    // ২. ZIP ফাইলটি সরাসরি GitHub-এ আপলোড করা
+    // ২. ZIP ফাইলটি GitHub-এ আপলোড করা
     const assetRes = await fetch(uploadUrl, {
       method: 'POST',
       headers: {
@@ -218,6 +230,11 @@ app.get('/api/status/:renderId', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// ফাইল সাইজ বা Multer এরর ধরার মিডলওয়্যার
+app.use((err, req, res, next) => {
+  res.status(400).json({ error: err.message });
 });
 
 app.listen(PORT, () => {
