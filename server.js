@@ -1,61 +1,6 @@
 const express = require('express');
 const multer = require('multer');
 const AdmZip = require('adm-zip');
-const { exec } = require('child_process');
-const path = require('path');
-const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
-const cors = require('cors');
-
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-const WORK_DIR = path.join(__dirname, 'workspaces');
-const OUT_DIR = path.join(__dirname, 'outputs');
-
-[UPLOAD_DIR, WORK_DIR, OUT_DIR].forEach((dir) => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-});
-
-app.use('/outputs', express.static(OUT_DIR));
-const upload = multer({ dest: UPLOAD_DIR });
-const jobs = {};
-
-function findCompositionId(projectDir) {
-  const srcDir = path.join(projectDir, 'src');
-  if (!fs.existsSync(srcDir)) return 'Main';
-  const files = fs.readdirSync(srcDir).filter((f) => f.endsWith('.tsx') || f.endsWith('.ts'));
-  for (const file of files) {
-    const content = fs.readFileSync(path.join(srcDir, file), 'utf8');
-    const match = content.match(/<Composition[^>]*id=["']([^"']+)["']/);
-    if (match && match[1]) return match[1];
-  }
-  return 'Main';
-}
-
-function findProjectRoot(baseDir) {
-  if (fs.existsSync(path.join(baseDir, 'package.json'))) return baseDir;
-  const entries = fs.readdirSync(baseDir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (entry.isDirectory() && !entry.name.startsWith('__MACOSX')) {
-      const subPath = path.join(baseDir, entry.name);
-      if (fs.existsSync(path.join(subPath, 'package.json'))) return subPath;
-    }
-  }
-  return baseDir;
-}
-
-app.get('/api/ping', (req, res) => res.json({ status: 'online' }));
-
-app.post('/api/render', upload.single('projectZip'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'ZIP ফাইল পাওয়া যায়নি' });
-
-  const jobId = uuidv4();
-const express = require('express');
-const multer = require('multer');
-const AdmZip = require('adm-zip');
 const { bundle } = require('@remotion/bundler');
 const { renderMedia, selectComposition } = require('@remotion/renderer');
 const path = require('path');
