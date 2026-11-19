@@ -173,7 +173,7 @@ app.get('/', (req, res) => {
           if (!res.ok) {
             clearInterval(interval);
             loader.style.display = 'none';
-            statusText.textContent = '❌ সার্ভার রিস্টার্ট হয়েছে (সম্ভবত মেমোরি লিমিট অতিক্রম করেছে)। আবার চেষ্টা করুন।';
+            statusText.textContent = '❌ সার্ভার রিস্টার্ট হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।';
             renderBtn.disabled = false;
             return;
           }
@@ -253,21 +253,45 @@ app.post('/render', upload.single('file'), async (req, res) => {
         throw new Error('প্রজেক্টে src/index.ts বা index.tsx ফাইল পাওয়া যায়নি');
       }
 
-      jobs[jobId].status = 'bundling (মেমোরি সেভিং মোড)';
-      const bundleLocation = await bundle({ entryPoint });
+      jobs[jobId].status = 'bundling...';
+      const bundleLocation = await bundle({
+        entryPoint,
+        webpackOverride: (config) => ({
+          ...config,
+          cache: false,
+          optimization: { minimize: false },
+        }),
+      });
 
-      jobs[jobId].status = 'selecting composition';
+      if (global.gc) {
+        global.gc();
+      }
+
+      const chromeOpts = {
+        executablePath: process.env.REMOTION_CHROME_EXECUTABLE || '/usr/bin/google-chrome-stable',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-zygote',
+          '--single-process',
+        ],
+      };
+
+      jobs[jobId].status = 'selecting composition...';
       const composition = await selectComposition({
         serveUrl: bundleLocation,
         id: 'Main',
+        chromiumOptions: chromeOpts,
       }).catch(async () => {
         const { getCompositions } = require('@remotion/renderer');
-        const comps = await getCompositions(bundleLocation);
+        const comps = await getCompositions(bundleLocation, { chromiumOptions: chromeOpts });
         if (!comps.length) throw new Error('কোনো Remotion Composition পাওয়া যায়নি');
         return comps[0];
       });
 
-      jobs[jobId].status = 'rendering video';
+      jobs[jobId].status = 'rendering MP4...';
       const outputFileName = `${jobId}.mp4`;
       const outputPath = path.join(OUTPUTS_DIR, outputFileName);
       const outputUrl = `/outputs/${outputFileName}`;
@@ -277,13 +301,14 @@ app.post('/render', upload.single('file'), async (req, res) => {
         composition,
         serveUrl: bundleLocation,
         codec: 'h264',
-        concurrency: 1, // ফ্রি সার্ভারের 512MB RAM বাঁচানোর জন্য
+        concurrency: 1,
+        offthreadVideoCacheSizeInBytes: 32 * 1024 * 1024,
         outputLocation: outputPath,
-        chromiumOptions: {
-          executablePath: process.env.REMOTION_CHROME_EXECUTABLE || '/usr/bin/google-chrome-stable',
-          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-        },
+        chromiumOptions: chromeOpts,
       });
+
+      fs.rmSync(extractDir, { recursive: true, force: true });
+      fs.rmSync(bundleLocation, { recursive: true, force: true });
 
       const now = new Date().toLocaleString('en-BD', {
         timeZone: 'Asia/Dhaka',
