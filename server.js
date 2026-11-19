@@ -22,8 +22,93 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 app.use(express.json());
-app.use(express.static('public'));
 app.use('/uploads', express.static(uploadDir));
+
+// ওয়েব অ্যাপের মূল ইন্টারফেস (Frontend UI)
+app.get('/', (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Remotion MP4 Renderer</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 16px; }
+    .card { background: #1e293b; padding: 24px; border-radius: 12px; width: 100%; max-width: 420px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); text-align: center; }
+    h2 { margin-top: 0; color: #38bdf8; }
+    input[type="file"], input[type="text"] { width: 100%; padding: 10px; margin: 10px 0; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #fff; box-sizing: border-box; }
+    button { width: 100%; padding: 12px; background: #0284c7; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 8px; }
+    button:disabled { background: #475569; cursor: not-allowed; }
+    #status { margin-top: 16px; padding: 12px; border-radius: 8px; background: #0f172a; font-size: 14px; display: none; word-break: break-word; }
+    a.download-btn { display: inline-block; margin-top: 10px; padding: 10px 16px; background: #16a34a; color: #fff; text-decoration: none; border-radius: 6px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Remotion MP4 Renderer</h2>
+    <input type="file" id="zipFile" accept=".zip" />
+    <input type="text" id="compId" placeholder="Composition ID (ঐচ্ছিক, ফাঁকা রাখতে পারেন)" />
+    <button id="renderBtn" onclick="startRender()">Render MP4 শুরু করুন</button>
+    <div id="status"></div>
+  </div>
+
+  <script>
+    async function startRender() {
+      const fileInput = document.getElementById('zipFile');
+      const compId = document.getElementById('compId').value.trim();
+      const btn = document.getElementById('renderBtn');
+      const statusDiv = document.getElementById('status');
+
+      if (!fileInput.files.length) {
+        alert('অনুগ্রহ করে একটি ZIP ফাইল সিলেক্ট করুন!');
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('projectZip', fileInput.files[0]);
+      if (compId) formData.append('compositionId', compId);
+
+      btn.disabled = true;
+      statusDiv.style.display = 'block';
+      statusDiv.innerHTML = 'ZIP আপলোড হচ্ছে এবং GitHub-এ রেন্ডার পাঠানো হচ্ছে...';
+
+      try {
+        const res = await fetch('/api/render', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (!res.ok) throw new Error(data.error || 'সমস্যা হয়েছে');
+
+        statusDiv.innerHTML = 'রেন্ডারিং চলছে (Render ID: ' + data.renderId + ')... <br>২-৪ মিনিট অপেক্ষা করুন, অটোমেটিক ডাউনলোড লিংক চলে আসবে।';
+        pollStatus(data.renderId);
+      } catch (err) {
+        statusDiv.innerHTML = '❌ এরর: ' + err.message;
+        btn.disabled = false;
+      }
+    }
+
+    function pollStatus(renderId) {
+      const statusDiv = document.getElementById('status');
+      const btn = document.getElementById('renderBtn');
+
+      const interval = setInterval(async () => {
+        try {
+          const res = await fetch('/api/status/' + renderId);
+          const data = await res.json();
+
+          if (data.status === 'completed' && data.downloadUrl) {
+            clearInterval(interval);
+            btn.disabled = false;
+            statusDiv.innerHTML = '✅ রেন্ডার সম্পন্ন হয়েছে!<br><a class="download-btn" href="' + data.downloadUrl + '">MP4 ডাউনলোড করুন</a>';
+          }
+        } catch (e) {}
+      }, 10000);
+    }
+  </script>
+</body>
+</html>
+  `);
+});
 
 // জিপ ফাইল আপলোড ও গিটহাব ওয়ার্কফ্লো ট্রিগার করার এন্ডপয়েন্ট
 app.post('/api/render', upload.single('projectZip'), async (req, res) => {
@@ -69,7 +154,7 @@ app.post('/api/render', upload.single('projectZip'), async (req, res) => {
     res.json({
       success: true,
       renderId,
-      message: 'রেন্ডারিং শুরু হয়েছে! কিছুক্ষণ পর ডাউনলোড লিংক চেক করুন।'
+      message: 'রেন্ডারিং শুরু হয়েছে!'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
