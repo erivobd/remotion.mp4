@@ -1,7 +1,5 @@
 const express = require('express');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -10,21 +8,12 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO_OWNER = 'erivobd';
 const REPO_NAME = 'remotion.mp4';
 
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
-});
-const upload = multer({ storage });
+// মেমোরিতে ফাইল নেওয়া (Render ডিস্ক মুছে যাওয়ার সমস্যা এড়াতে)
+const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(express.json());
-app.use('/uploads', express.static(uploadDir));
 
-// ওয়েব অ্যাপের মূল ইন্টারফেস (Frontend UI)
+// ওয়েব অ্যাপের মূল ইন্টারফেস
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -71,7 +60,7 @@ app.get('/', (req, res) => {
 
       btn.disabled = true;
       statusDiv.style.display = 'block';
-      statusDiv.innerHTML = 'ZIP আপলোড হচ্ছে এবং GitHub-এ রেন্ডার পাঠানো হচ্ছে...';
+      statusDiv.innerHTML = 'ZIP ফাইল GitHub-এ আপলোড হচ্ছে...';
 
       try {
         const res = await fetch('/api/render', { method: 'POST', body: formData });
@@ -110,7 +99,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// জিপ ফাইল আপলোড ও গিটহাব ওয়ার্কফ্লো ট্রিগার করার এন্ডপয়েন্ট
+// সরাসরি GitHub Release-এ ZIP আপলোড করে Workflow চালু করা
 app.post('/api/render', upload.single('projectZip'), async (req, res) => {
   try {
     if (!req.file) {
@@ -121,19 +110,59 @@ app.post('/api/render', upload.single('projectZip'), async (req, res) => {
     }
 
     const renderId = `rnd_${Date.now()}`;
-    const hostUrl = `${req.protocol}://${req.get('host')}`;
-    const zipUrl = `${hostUrl}/uploads/${req.file.filename}`;
     const compositionId = req.body.compositionId || '';
 
-    const response = await fetch(
+    // ১. GitHub-এ একটি অস্থায়ী Release তৈরি করা
+    const relRes = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        tag_name: `src-${renderId}`,
+        name: `Source ${renderId}`,
+        prerelease: true
+      })
+    });
+
+    if (!relRes.ok) {
+      const errText = await relRes.text();
+      return res.status(relRes.status).json({ error: `Release তৈরি হয়নি: ${errText}` });
+    }
+
+    const relData = await relRes.json();
+    const uploadUrl = relData.upload_url.replace('{?name,label}', `?name=project.zip`);
+
+    // ২. ZIP ফাইলটি সরাসরি GitHub-এ আপলোড করা
+    const assetRes = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/zip'
+      },
+      body: req.file.buffer
+    });
+
+    if (!assetRes.ok) {
+      const errText = await assetRes.text();
+      return res.status(assetRes.status).json({ error: `ZIP আপলোড হয়নি: ${errText}` });
+    }
+
+    const assetData = await assetRes.json();
+    const zipUrl = assetData.browser_download_url;
+
+    // ৩. GitHub Actions Workflow ট্রিগার করা
+    const wfRes = await fetch(
       `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/workflows/render.yml/dispatches`,
       {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${GITHUB_TOKEN}`,
           'Accept': 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-          'X-GitHub-Api-Version': '2022-11-28'
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           ref: 'main',
@@ -146,22 +175,18 @@ app.post('/api/render', upload.single('projectZip'), async (req, res) => {
       }
     );
 
-    if (!response.ok) {
-      const errText = await response.text();
-      return res.status(response.status).json({ error: `GitHub API Error: ${errText}` });
+    if (!wfRes.ok) {
+      const errText = await wfRes.text();
+      return res.status(wfRes.status).json({ error: `Workflow চালু হয়নি: ${errText}` });
     }
 
-    res.json({
-      success: true,
-      renderId,
-      message: 'রেন্ডারিং শুরু হয়েছে!'
-    });
+    res.json({ success: true, renderId });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// রেন্ডার স্ট্যাটাস ও ডাউনলোড লিংক চেক করার এন্ডপয়েন্ট
+// রেন্ডার স্ট্যাটাস ও ডাউনলোড লিংক চেক করা
 app.get('/api/status/:renderId', async (req, res) => {
   try {
     const { renderId } = req.params;
