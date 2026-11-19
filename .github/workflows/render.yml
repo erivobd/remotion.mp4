@@ -1,0 +1,76 @@
+name: Render Remotion ZIP to MP4
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'URL of the uploaded Remotion project ZIP'
+        required: true
+      render_id:
+        description: 'Unique Render ID'
+        required: true
+      composition_id:
+        description: 'Remotion Composition ID (optional)'
+        required: false
+        default: ''
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download and Extract Project ZIP
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p project_workspace
+          gh release download "src-${{ github.event.inputs.render_id }}" -p "project.zip" -O project.zip
+          unzip -q project.zip -d project_workspace
+
+      - name: Locate Project Root & Install Dependencies
+        id: setup_project
+        run: |
+          PKG_PATH=$(find project_workspace -name "package.json" -not -path "*/node_modules/*" | head -n 1)
+          if [ -z "$PKG_PATH" ]; then
+            echo "Error: No package.json found in ZIP"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$PKG_PATH")
+          echo "project_dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          cd "$PROJECT_DIR"
+          npm install --legacy-peer-deps
+
+      - name: Render Video to MP4
+        run: |
+          cd "${{ steps.setup_project.outputs.project_dir }}"
+          ENTRY_FILE=$(find src -maxdepth 2 \( -name "index.ts" -o -name "index.tsx" -o -name "Root.tsx" \) | head -n 1)
+          if [ -z "$ENTRY_FILE" ]; then
+            ENTRY_FILE="src/index.ts"
+          fi
+          
+          COMP_ID="${{ github.event.inputs.composition_id }}"
+          if [ -z "$COMP_ID" ]; then
+            COMP_ID=$(npx remotion compositions "$ENTRY_FILE" --quiet | grep -E '^[A-Za-z0-9_-]+' | tail -n 1 | awk '{print $1}')
+          fi
+          
+          echo "Detected Entry: $ENTRY_FILE | Composition ID: $COMP_ID"
+          npx remotion render "$ENTRY_FILE" "$COMP_ID" /tmp/output.mp4
+
+      - name: Upload Rendered MP4 as Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: render-${{ github.event.inputs.render_id }}
+          name: Render ${{ github.event.inputs.render_id }}
+          files: /tmp/output.mp4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
