@@ -1,0 +1,195 @@
+name: Render Remotion ZIP to MP4
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'URL of the uploaded Remotion project ZIP'
+        required: true
+      render_id:
+        description: 'Unique Render ID'
+        required: true
+      composition_id:
+        description: 'Remotion Composition ID (optional)'
+        required: false
+        default: ''
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    env:
+      PROGRESS_URL: https://remotion-mp4.onrender.com/api/progress/${{ github.event.inputs.render_id }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download and Extract Project ZIP
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RENDER_ID: ${{ github.event.inputs.render_id }}
+          ZIP_URL: ${{ github.event.inputs.zip_url }}
+        run: |
+          curl -sS -X POST "$PROGRESS_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"percent":6,"stage":"প্রজেক্ট ডাউনলোড হচ্ছে...","detail":"GitHub রানারে ZIP ফাইল নামানো হচ্ছে"}' || true
+
+          mkdir -p project_workspace
+          if gh release download "src-${RENDER_ID}" -p "project.zip" -O project.zip 2>/dev/null; then
+            echo "Downloaded project.zip from GitHub Release."
+          else
+            echo "Downloading project.zip from Direct URL..."
+            curl -fL "$ZIP_URL" -o project.zip
+          fi
+          unzip -q project.zip -d project_workspace
+          chmod -R u+rwX project_workspace
+
+      - name: Locate Project Root & Install Dependencies
+        id: setup_project
+        run: |
+          curl -sS -X POST "$PROGRESS_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"percent":10,"stage":"প্যাকেজ ইনস্টল হচ্ছে...","detail":"Remotion ও ডিপেন্ডেন্সি প্রস্তুত করা হচ্ছে"}' || true
+
+          PKG_PATH=$(find project_workspace -name "package.json" -not -path "*/node_modules/*" | head -n 1)
+          if [ -z "$PKG_PATH" ]; then
+            echo "Error: No package.json found in ZIP"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$PKG_PATH")
+          echo "project_dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          cd "$PROJECT_DIR"
+          npm install --legacy-peer-deps
+
+      - name: Render Video to MP4 with Live Progress
+        env:
+          PROJECT_DIR: ${{ steps.setup_project.outputs.project_dir }}
+          INPUT_COMP_ID: ${{ github.event.inputs.composition_id }}
+        run: |
+          cd "$PROJECT_DIR"
+
+          if [ -f "src/index.ts" ]; then
+            ENTRY_FILE="src/index.ts"
+          elif [ -f "src/index.tsx" ]; then
+            ENTRY_FILE="src/index.tsx"
+          else
+            ENTRY_FILE=$(find . -maxdepth 3 \( -name "index.ts" -o -name "index.tsx" \) -not -path "*/node_modules/*" | head -n 1)
+          fi
+
+          echo "Using Entry File: $ENTRY_FILE"
+
+          curl -sS -X POST "$PROGRESS_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"percent":15,"stage":"প্রজেক্ট বান্ডেল হচ্ছে...","detail":"Composition যাচাই করা হচ্ছে"}' || true
+
+          COMP_ID="$INPUT_COMP_ID"
+          if [ -z "$COMP_ID" ]; then
+            COMP_ID=$(npx remotion compositions "$ENTRY_FILE" --quiet | grep -E '^[A-Za-z0-9_-]+' | tail -n 1 | awk '{print $1}')
+          fi
+
+          echo "Using Composition ID: $COMP_ID"
+          export ENTRY_FILE
+          export COMP_ID
+
+          node -e '
+            const { spawn } = require("child_process");
+            const url = process.env.PROGRESS_URL;
+            const entry = process.env.ENTRY_FILE;
+            const comp = process.env.COMP_ID;
+            let lastSent = 0;
+            let maxPct = 16;
+
+            const send = (percent, stage, detail, status = "processing") => {
+              if (status === "processing") {
+                if (percent < maxPct) percent = maxPct;
+                maxPct = percent;
+              }
+              fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ percent, stage, detail, status })
+              }).catch(() => {});
+            };
+
+            send(16, "রেন্ডার শুরু হয়েছে...", "ফ্রেম তৈরি করা শুরু হচ্ছে");
+
+            const child = spawn(
+              "npx",
+              ["remotion", "render", entry, comp, "/tmp/output.mp4", "--codec=h264", "--concurrency=2"],
+              { stdio: ["inherit", "pipe", "pipe"] }
+            );
+
+            const parseChunk = (chunk) => {
+              const txt = chunk.toString();
+              process.stdout.write(txt);
+              const now = Date.now();
+              if (now - lastSent < 3000) return;
+
+              const clean = txt.replace(/\x1b\[[0-9;]*m/g, "");
+              const mRender = clean.match(/Rendered\s+(\d+)\s*\/\s*(\d+)/i);
+              const mEncode = clean.match(/(?:Encoded|Stitched)\s+(\d+)\s*\/\s*(\d+)/i);
+              const mGeneric = clean.match(/(\d+)\s*\/\s*(\d+)/);
+
+              if (mRender) {
+                const cur = parseInt(mRender[1], 10);
+                const tot = parseInt(mRender[2], 10);
+                if (tot > 0 && cur <= tot) {
+                  const pct = Math.min(82, Math.max(16, Math.round(16 + (cur / tot) * 66)));
+                  lastSent = now;
+                  send(pct, "ভিডিও রেন্ডার হচ্ছে...", `ফ্রেম ${cur} / ${tot}`);
+                }
+              } else if (mEncode) {
+                const cur = parseInt(mEncode[1], 10);
+                const tot = parseInt(mEncode[2], 10);
+                if (tot > 0 && cur <= tot) {
+                  const pct = Math.min(95, Math.max(82, Math.round(82 + (cur / tot) * 13)));
+                  lastSent = now;
+                  send(pct, "ভিডিও এনকোডিং হচ্ছে...", `এনকোড ${cur} / ${tot}`);
+                }
+              } else if (mGeneric) {
+                const cur = parseInt(mGeneric[1], 10);
+                const tot = parseInt(mGeneric[2], 10);
+                if (tot > 20 && cur <= tot) {
+                  const pct = Math.min(94, Math.max(18, Math.round(18 + (cur / tot) * 76)));
+                  lastSent = now;
+                  send(pct, "রেন্ডারিং চলছে...", `ফ্রেম ${cur} / ${tot}`);
+                }
+              }
+            };
+
+            child.stdout.on("data", parseChunk);
+            child.stderr.on("data", parseChunk);
+            child.on("close", (code) => {
+              if (code === 0) {
+                send(96, "MP4 আপলোড হচ্ছে...", "রেন্ডার শেষ, ডাউনলোড লিংক তৈরি হচ্ছে");
+              } else {
+                send(maxPct, "রেন্ডার ব্যর্থ হয়েছে", "Remotion রেন্ডারে ত্রুটি হয়েছে (Exit " + code + ")", "failed");
+              }
+              process.exit(code);
+            });
+          '
+
+      - name: Upload Rendered MP4 as Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: render-${{ github.event.inputs.render_id }}
+          name: Render ${{ github.event.inputs.render_id }}
+          files: /tmp/output.mp4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Failure to Web App
+        if: failure()
+        run: |
+          curl -sS -X POST "$PROGRESS_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"percent":0,"stage":"রেন্ডার ব্যর্থ হয়েছে","detail":"GitHub Actions লগ চেক করুন।","status":"failed"}' || true
